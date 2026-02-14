@@ -1,0 +1,621 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <?!= include('styles'); ?>
+</head>
+<body>
+
+  <div class="appbar">
+    <div class="inner">
+      <div class="title">
+        <button class="btn ghost" id="btnDrawer" type="button" aria-label="Abrir lista">☰</button>
+        <div style="min-width:0">
+          <h1>Tribu · Valoración</h1>
+          <span class="sub" id="subTitle">Cargando…</span>
+        </div>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <button class="btn" type="button" id="btnSyncNow">Sync ahora</button>
+        <button class="btn primary" type="button" id="btnReloadTop">Recargar</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="scrim" id="scrim"></div>
+
+  <div class="shell">
+    <aside class="drawer card" id="drawer">
+      <div class="head">
+        <div class="listControls">
+          <input id="q" placeholder="Buscar…" autocomplete="off" />
+          <div class="row2">
+            <select id="group"></select>
+            <select id="mode">
+              <option value="queue">Cola</option>
+              <option value="all">Todos</option>
+            </select>
+          </div>
+          <button class="btn primary" type="button" id="btnReload">Recargar</button>
+          <small id="hint">
+            Cola = prox_contacto vacío OR &lt; hoy() OR &gt; hoy()+periodo · Orden: Tot desc
+          </small>
+        </div>
+      </div>
+
+      <div class="body">
+        <div class="mut" id="listMsg"></div>
+        <div class="list" id="list"></div>
+      </div>
+
+      <div class="foot">
+        <button class="btn" type="button" id="btnClose">Cerrar</button>
+      </div>
+    </aside>
+
+    <main class="card main">
+      <div id="detailTop">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+          <div style="min-width:0">
+            <div style="font-weight:900;font-size:16px" id="title">Selecciona un contacto</div>
+            <div class="mut" id="idsLine"></div>
+          </div>
+          <div class="badge">Tot <span id="tot">—</span></div>
+        </div>
+
+        <div class="metaLine">
+          <span class="badge">Icono <span id="icono">—</span></span>
+          <span class="badge">Periodo <span id="perView">—</span></span>
+          <span class="badge">Estado <span id="st" class="status s-ok">—</span></span>
+          <span class="badge">Prox <span id="proxView">—</span></span>
+        </div>
+
+        <div style="margin-top:12px">
+          <label>Próximo contacto (prox_contacto)</label>
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <input id="prox" type="date" />
+            <button class="btn" type="button" id="btnSuggest">Sugerir</button>
+          </div>
+          <small id="proxHint" class="mut"></small>
+        </div>
+
+        <div class="grid2">
+          <div>
+            <label>Confianza (Conf)</label>
+            <select id="conf"></select>
+          </div>
+          <div>
+            <label>Periodo</label>
+            <select id="periodo"></select>
+          </div>
+        </div>
+
+        <div class="grid4">
+          <div><label>Emo</label><select id="emo"></select></div>
+          <div><label>Ene</label><select id="ene"></select></div>
+          <div><label>Est</label><select id="est"></select></div>
+          <div><label>Rep</label><select id="rep"></select></div>
+        </div>
+
+        <!-- NOTAS (SOLO LECTURA) -->
+        <div style="margin-top:12px">
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;justify-content:space-between">
+            <label style="margin:0">Notas (Contacts)</label>
+            <a class="btn" id="btnEditContacts" target="_blank" rel="noopener">Editar en Contacts</a>
+          </div>
+          <textarea id="notes" rows="6" readonly placeholder="Cargando notas…"></textarea>
+          <small id="notesHint" class="mut"></small>
+        </div>
+
+        <div class="actionbar">
+          <button class="btn primary" type="button" id="btnSave">Guardar</button>
+          <button class="btn" type="button" id="btnSaveNext">Guardar y siguiente</button>
+        </div>
+
+        <div class="mut" id="msg" style="margin-top:10px"></div>
+
+        <details open>
+          <summary>Grupos / etiquetas</summary>
+          <div class="detailsBody">
+            <div class="mut" id="groups">(sin grupos)</div>
+          </div>
+        </details>
+
+        <details id="detailsBox">
+          <summary>Detalles (carga bajo demanda)</summary>
+          <div class="detailsBody">
+            <div class="mut" id="detailsMsg">Pulsa para cargar los detalles.</div>
+            <div id="details"></div>
+          </div>
+        </details>
+      </div>
+    </main>
+  </div>
+
+<script>
+  let INIT = null;
+  const START_CID = <?!= JSON.stringify(startCid || '') ?>;
+  let START_CID_USED = false;
+
+  let LIST = [];
+  let SEL = null;
+  let DETAILS_LOADED_FOR = null;
+  let debounceT = null;
+
+  let BASELINE_UT = '';
+  let FETCHED_AT_MS = 0;
+  let BASELINE_FORM = null;
+  const STALE_MS = 10 * 60 * 1000;
+
+  let PENDING = 0;
+  let LAST_SYNC_AT = '';
+  let LAST_SYNC_ERR = '';
+
+  const $ = (id) => document.getElementById(id);
+  function setMsg(id, s){ $(id).textContent = s || ''; }
+
+  function openDrawer(){ $('drawer').classList.add('open'); $('scrim').classList.add('show'); }
+  function closeDrawer(){ $('drawer').classList.remove('open'); $('scrim').classList.remove('show'); }
+  function isDesktop(){ return window.matchMedia && window.matchMedia('(min-width: 900px) and (pointer: fine)').matches; }
+
+  function escapeHtml(s){
+    return String(s || '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  }
+  function formatTot(v){
+    const n = Number(String(v).replace(',', '.'));
+    if (!Number.isFinite(n)) return '—';
+    return n.toFixed(2);
+  }
+
+  function fillSelect(id, opts){
+    const el = $(id);
+    el.innerHTML = (opts || []).map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('');
+  }
+
+  function setSelectSmart(id, v){
+    const el = $(id);
+    const s0 = (v == null ? '' : String(v)).trim();
+    if (!s0) { el.value = ''; return; }
+
+    const sDot = s0.replace(',', '.');
+    const n = Number(sDot);
+    const sNum = Number.isFinite(n) ? String(n) : '';
+    const sComma = s0.replace('.', ',');
+
+    const candidates = [s0, sComma, sDot, sNum, (sNum ? sNum.replace('.', ',') : '')].filter(Boolean);
+
+    for (const c of candidates){
+      for (let i = 0; i < el.options.length; i++){
+        if (el.options[i].value === c) { el.value = c; return; }
+      }
+    }
+    el.value = '';
+  }
+
+  function setSubtitle(base){
+    const sync = ` · Sync pend: ${PENDING}` +
+                 (LAST_SYNC_AT ? ` · last: ${LAST_SYNC_AT}` : '') +
+                 (LAST_SYNC_ERR ? ` · ERR: ${LAST_SYNC_ERR}` : '');
+    $('subTitle').textContent = (base || '—') + sync;
+  }
+
+  function initUI(){
+    setSubtitle('Inicializando…');
+    setMsg('listMsg', 'Cargando…');
+
+    google.script.run
+      .withSuccessHandler(res => {
+        INIT = res || {};
+        PENDING = Number(INIT.outboxPending || 0);
+        LAST_SYNC_AT = String(INIT.lastSyncAt || '');
+        LAST_SYNC_ERR = String(INIT.lastSyncError || '');
+
+        fillSelect('conf', INIT.confOpts || ['','0','1','2']);
+        ['emo','ene','est','rep'].forEach(x => fillSelect(x, INIT.scoreOpts || ['','-2','-1','0','1','2']));
+        fillSelect('periodo', INIT.periodos || []);
+
+        if (START_CID) $('mode').value = 'all';
+
+        const groups = (INIT.groups || []);
+        const g = $('group');
+        g.innerHTML = groups.map(n => `<option value="${escapeHtml(n)}">${n ? escapeHtml(n) : '(Todos)'}</option>`).join('');
+        if (!groups.length) g.innerHTML = `<option value="">(Todos)</option>`;
+
+        setSubtitle('Listo. Cargando…');
+        reloadList();
+
+        if (!isDesktop()) closeDrawer();
+      })
+      .withFailureHandler(e => {
+        setSubtitle('ERROR init');
+        setMsg('listMsg', (e && e.message) ? e.message : String(e));
+      })
+      .apiInit();
+  }
+
+  function debouncedReload(){
+    clearTimeout(debounceT);
+    debounceT = setTimeout(reloadList, 250);
+  }
+
+  function reloadList(){
+    const q = $('q').value.trim();
+    const group = $('group').value;
+    const mode = $('mode').value;
+
+    setMsg('listMsg', 'Cargando lista…');
+    $('list').innerHTML = '';
+
+    google.script.run
+      .withSuccessHandler(res => {
+        LIST = (res && res.rows) ? res.rows : [];
+        PENDING = Number((res && res.pending) || PENDING || 0);
+
+        setMsg('listMsg', LIST.length ? `${LIST.length} contactos` : 'Sin resultados');
+        setSubtitle(LIST.length ? `Cola: ${LIST.length} contactos` : 'Sin contactos en filtro');
+
+        renderListChunked();
+
+        if (START_CID && !START_CID_USED) {
+          const hit = LIST.find(x => x.contactId === START_CID);
+          START_CID_USED = true;
+          if (hit) { select(START_CID); return; }
+        }
+
+        if (!SEL && LIST.length) select(LIST[0].contactId);
+        if (SEL && LIST.length && !LIST.some(x => x.contactId === SEL)) select(LIST[0].contactId);
+      })
+      .withFailureHandler(e => setMsg('listMsg', (e && e.message) ? e.message : String(e)))
+      .apiList({ q, group, mode, limit: 1200 });
+  }
+
+  function renderListChunked(){
+    const host = $('list');
+    host.innerHTML = '';
+
+    const chunk = 80;
+    let i = 0;
+
+    function step(){
+      const end = Math.min(i + chunk, LIST.length);
+      const frag = document.createDocumentFragment();
+
+      for (; i < end; i++){
+        const r = LIST[i];
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'item' + (SEL === r.contactId ? ' sel' : '');
+        btn.dataset.id = r.contactId;
+
+        const st = r.status || 'ok';
+        const stTxt = st === 'missing' ? 'SIN FECHA' : (st === 'past' ? 'VENCIDO' : (st === 'too_far' ? 'MUY LEJOS' : 'OK'));
+        const prox = r.prox_contacto ? r.prox_contacto : '—';
+
+        btn.innerHTML = `
+          <div class="ico">${escapeHtml(r.icono || '')}</div>
+          <div class="nm">
+            <div class="name">${escapeHtml(r.nombre || '(sin nombre)')}</div>
+            <div class="sub">
+              <span class="status s-${st}">${stTxt}</span>
+              <span>prox: ${escapeHtml(prox)}</span>
+              <span>${escapeHtml(r.periodo || '')}</span>
+            </div>
+          </div>
+          <div class="tot">${formatTot(r.tot)}</div>
+        `;
+        frag.appendChild(btn);
+      }
+
+      host.appendChild(frag);
+      if (i < LIST.length) requestAnimationFrame(step);
+    }
+
+    requestAnimationFrame(step);
+  }
+
+  $('list').addEventListener('click', (ev) => {
+    const btn = ev.target.closest('button.item');
+    if (!btn) return;
+    select(btn.dataset.id);
+  });
+
+  function setEditContactsLink(){
+    const selected = LIST.find(x => x.contactId === SEL) || {};
+    const rn = String(selected.peopleRN || '').trim();   // "people/c..."
+    const id = rn.replace(/^people\//, '');              // "c..."
+    const a = $('btnEditContacts');
+    if (!a) return;
+    a.href = id ? ('https://contacts.google.com/person/' + encodeURIComponent(id))
+                : 'https://contacts.google.com/';
+  }
+
+  function loadNotesReadOnly(contactId){
+    const ta = $('notes');
+    const hint = $('notesHint');
+    if (!ta || !hint) return;
+
+    const selected = LIST.find(x => x.contactId === contactId) || {};
+    const rn = String(selected.peopleRN || '').trim();
+    if (!rn) { hint.textContent = 'Sin PeopleRN: no puedo cargar notas.'; return; }
+
+    ta.value = '';
+    hint.textContent = 'Cargando…';
+
+    google.script.run
+      .withSuccessHandler(res => {
+        if (SEL !== contactId) return;
+        if (!res || !res.ok) {
+          hint.textContent = (res && res.error) ? String(res.error) : 'No se pudieron cargar notas.';
+          return;
+        }
+        ta.value = String(res.notes || '');
+        hint.textContent = '';
+      })
+      .withFailureHandler(e => {
+        if (SEL !== contactId) return;
+        hint.textContent = (e && e.message) ? e.message : String(e);
+      })
+      .apiGetNotesByRn(rn);
+  }
+
+  function select(contactId){
+    SEL = contactId;
+    DETAILS_LOADED_FOR = null;
+    $('details').innerHTML = '';
+    setMsg('detailsMsg', 'Pulsa para cargar los detalles.');
+
+    loadLite(contactId);
+
+    // Notas (solo lectura) + link a Contacts
+    setEditContactsLink();
+    loadNotesReadOnly(contactId);
+
+    const items = $('list').querySelectorAll('.item');
+    items.forEach(x => x.classList.toggle('sel', x.dataset.id === SEL));
+
+    if (!isDesktop()) closeDrawer();
+  }
+
+  function applyLiteToUI(res){
+    const roi = (res && res.roi) ? res.roi : {};
+    $('title').textContent = roi.nombre || '(sin nombre)';
+    $('icono').textContent = roi.icono || '—';
+    $('tot').textContent = formatTot(roi.tot);
+    $('perView').textContent = roi.periodo || '—';
+
+    $('proxView').textContent = res.prox_contacto || '—';
+
+    const st = res.prox_status || 'ok';
+    const stEl = $('st');
+    stEl.className = 'status s-' + st;
+    stEl.textContent = (st === 'missing' ? 'SIN FECHA' : (st === 'past' ? 'VENCIDO' : (st === 'too_far' ? 'MUY LEJOS' : 'OK')));
+
+    setSelectSmart('conf', roi.conf);
+    $('emo').value  = (roi.emo ?? '');
+    $('ene').value  = (roi.ene ?? '');
+    $('est').value  = (roi.est ?? '');
+    $('rep').value  = (roi.rep ?? '');
+    $('periodo').value = (roi.periodo ?? '');
+
+    $('prox').value = res.prox_contacto || '';
+    $('proxHint').textContent = res.proposed_prox
+      ? `Sugerencia (hoy+periodo): ${res.proposed_prox}`
+      : 'Sin sugerencia (periodo vacío/no válido)';
+
+    $('groups').textContent = (res.groups && res.groups.length) ? res.groups.join(' · ') : '(sin grupos)';
+  }
+
+  function loadLite(contactId){
+    setMsg('msg', 'Cargando…');
+
+    google.script.run
+      .withSuccessHandler(res => {
+        setMsg('msg', '');
+        BASELINE_UT = String(res.peopleUpdateTime || '').trim();
+        FETCHED_AT_MS = Date.now();
+        applyLiteToUI(res || {});
+        BASELINE_FORM = snapshotForm();
+        setSaveEnabled();
+        setSubtitle($('title').textContent || '—');
+      })
+      .withFailureHandler(e => setMsg('msg', (e && e.message) ? e.message : String(e)))
+      .apiGetContactLite(contactId);
+  }
+
+  function collectPayload(){
+    const selected = LIST.find(x => x.contactId === SEL) || {};
+    const rn = (selected.peopleRN || '').trim();
+
+    return {
+      contactId: SEL,
+      peopleRN: rn,
+      nombre: $('title').textContent.trim(),
+      conf: $('conf').value,
+      emo: $('emo').value,
+      ene: $('ene').value,
+      est: $('est').value,
+      rep: $('rep').value,
+      periodo: $('periodo').value,
+      prox_contacto: $('prox').value,
+      baselineUpdateTime: BASELINE_UT,
+      _fetchedAtMs: FETCHED_AT_MS,
+      _clientDirty: isDirty()
+    };
+  }
+
+  function updateListItemInPlace(contactId, lite){
+    const i = LIST.findIndex(x => x.contactId === contactId);
+    if (i >= 0) {
+      LIST[i].nombre = lite.roi.nombre;
+      LIST[i].icono = lite.roi.icono;
+      LIST[i].periodo = lite.roi.periodo;
+      LIST[i].tot = lite.roi.tot;
+      LIST[i].prox_contacto = lite.prox_contacto;
+      LIST[i].status = lite.prox_status;
+    }
+
+    const btn = $('list').querySelector(`.item[data-id="${CSS.escape(contactId)}"]`);
+    if (!btn) return;
+
+    const r = LIST[i] || {};
+    const st = r.status || 'ok';
+    const stTxt = st === 'missing' ? 'SIN FECHA' : (st === 'past' ? 'VENCIDO' : (st === 'too_far' ? 'MUY LEJOS' : 'OK'));
+    const prox = r.prox_contacto ? r.prox_contacto : '—';
+
+    btn.innerHTML = `
+      <div class="ico">${escapeHtml(r.icono || '')}</div>
+      <div class="nm">
+        <div class="name">${escapeHtml(r.nombre || '(sin nombre)')}</div>
+        <div class="sub">
+          <span class="status s-${st}">${stTxt}</span>
+          <span>prox: ${escapeHtml(prox)}</span>
+          <span>${escapeHtml(r.periodo || '')}</span>
+        </div>
+      </div>
+      <div class="tot">${formatTot(r.tot)}</div>
+    `;
+  }
+
+  function setSaving(isSaving){
+    if (isSaving) {
+      $('btnSave').disabled = true;
+      $('btnSaveNext').disabled = true;
+      return;
+    }
+    setSaveEnabled();
+  }
+
+  function snapshotForm(){
+    return {
+      conf: $('conf').value,
+      emo: $('emo').value,
+      ene: $('ene').value,
+      est: $('est').value,
+      rep: $('rep').value,
+      periodo: $('periodo').value,
+      prox_contacto: $('prox').value
+    };
+  }
+
+  function isDirty(){
+    if (!BASELINE_FORM) return false;
+    const cur = snapshotForm();
+    for (const k in cur){
+      if (String(cur[k] ?? '') !== String(BASELINE_FORM[k] ?? '')) return true;
+    }
+    return false;
+  }
+
+  function setSaveEnabled(){
+    const en = !!SEL && isDirty();
+    $('btnSave').disabled = !en;
+    $('btnSaveNext').disabled = !en;
+  }
+
+  function save(opts){
+    opts = opts || {};
+    if (!SEL) return;
+
+    if (!isDirty()) {
+      setMsg('msg', 'Nada que guardar.');
+      setSaveEnabled();
+      return;
+    }
+
+    if (FETCHED_AT_MS && (Date.now() - FETCHED_AT_MS > STALE_MS)) {
+      setMsg('msg', 'Edición caducada (>10 min). Pulsa Recargar y reintenta.');
+      setSaveEnabled();
+      return;
+    }
+
+    setSaving(true);
+    setMsg('msg', 'Guardando en Sheets…');
+
+    const payload = collectPayload();
+    google.script.run
+      .withSuccessHandler(res => {
+        setSaving(false);
+
+        if (!res || !res.ok) return setMsg('msg', (res && res.error) || 'Error');
+
+        const lite = (res && res.lite) ? res.lite : null;
+        PENDING = Number((res && res.pending) || PENDING || 0);
+
+        if (lite) {
+          applyLiteToUI(lite);
+          updateListItemInPlace(SEL, lite);
+        }
+
+        FETCHED_AT_MS = Date.now();
+        BASELINE_FORM = snapshotForm();
+        setSaveEnabled();
+
+        setMsg('msg', `OK (sync diferido · pendientes: ${PENDING})`);
+
+        if (opts.goNext) {
+          const idx = LIST.findIndex(x => x.contactId === SEL);
+          if (idx >= 0 && idx + 1 < LIST.length) select(LIST[idx + 1].contactId);
+        }
+      })
+      .withFailureHandler(e => {
+        setSaving(false);
+        setMsg('msg', (e && e.message) ? e.message : String(e));
+      })
+      .apiSave(payload);
+  }
+
+  function saveAndNext(){ save({ goNext: true }); }
+
+  function applyProposed(){
+    const hint = $('proxHint').textContent || '';
+    const m = hint.match(/(\d{4}-\d{2}-\d{2})/);
+    if (m) { $('prox').value = m[1]; setSaveEnabled(); }
+  }
+
+  function syncNow(){
+    setMsg('msg', 'Forzando sync…');
+    google.script.run
+      .withSuccessHandler(res => {
+        PENDING = Number(res.pending || 0);
+        LAST_SYNC_AT = String(res.lastSyncAt || '');
+        LAST_SYNC_ERR = String(res.lastSyncError || '');
+        setMsg('msg', LAST_SYNC_ERR ? `Sync ERROR: ${LAST_SYNC_ERR}` : `Sync OK · pendientes: ${PENDING}`);
+        setSubtitle($('title').textContent || '—');
+      })
+      .withFailureHandler(e => setMsg('msg', (e && e.message) ? e.message : String(e)))
+      .apiSyncNow();
+  }
+
+  window.addEventListener('load', () => {
+    initUI();
+
+    $('q').addEventListener('input', debouncedReload);
+    $('group').addEventListener('change', reloadList);
+    $('mode').addEventListener('change', reloadList);
+
+    $('btnReload').addEventListener('click', reloadList);
+    $('btnReloadTop').addEventListener('click', reloadList);
+
+    $('btnSave').addEventListener('click', () => save());
+    $('btnSaveNext').addEventListener('click', saveAndNext);
+
+    // Habilitar Guardar solo si hay cambios
+    ['conf','emo','ene','est','rep','periodo','prox'].forEach(id => {
+      const el = $(id);
+      if (!el) return;
+      el.addEventListener('change', setSaveEnabled);
+      el.addEventListener('input', setSaveEnabled);
+    });
+    $('btnSuggest').addEventListener('click', applyProposed);
+
+    $('btnSyncNow').addEventListener('click', syncNow);
+
+    $('btnDrawer').addEventListener('click', openDrawer);
+    $('btnClose').addEventListener('click', closeDrawer);
+    $('scrim').addEventListener('click', closeDrawer);
+  });
+</script>
+
+</body>
+</html>

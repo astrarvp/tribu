@@ -1,0 +1,234 @@
+<script>
+let INIT = null;
+let LIST = [];
+let SEL = null;
+let debounceT = null;
+const DETAILS_CACHE = new Map();
+
+let BASELINE_UT = '';
+let FETCHED_AT_MS = 0;
+let BASELINE_FORM = null;
+const STALE_MS = 10 * 60 * 1000;
+let PENDING = 0;
+
+function setMsg(id, s){ document.getElementById(id).textContent = s || ''; }
+function escapeHtml(s){
+  return String(s || '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+}
+function formatTot(v){
+  const n = Number(String(v).replace(',', '.'));
+  if (!Number.isFinite(n)) return '';
+  return n.toFixed(2);
+}
+function stText(st){
+  if (st === 'missing') return 'SIN FECHA';
+  if (st === 'past') return 'VENCIDO';
+  if (st === 'too_far') return 'MUY LEJOS';
+  return 'OK';
+}
+
+function fillSelect(id, opts){
+  const el = document.getElementById(id);
+  el.innerHTML = (opts || []).map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('');
+}
+
+function initUI(){
+  setMsg('listMsg', 'Cargando…');
+
+  google.script.run
+    .withSuccessHandler(res => {
+      INIT = res || {};
+      PENDING = Number(INIT.outboxPending || 0);
+
+      fillSelect('conf', [''].concat(INIT.confOpts || []));
+      ['emo','ene','est','rep'].forEach(x => fillSelect(x, [''].concat(INIT.scoreOpts || [])));
+      fillSelect('periodo', INIT.periodos || []);
+
+      const g = document.getElementById('group');
+      const groups = [''].concat(INIT.groups || []);
+      g.innerHTML = groups.map(n => `<option value="${escapeHtml(n)}">${n ? escapeHtml(n) : '(Todos)'}</option>`).join('');
+
+      reloadList();
+    })
+    .withFailureHandler(e => setMsg('listMsg', (e && e.message) ? e.message : String(e)))
+    .apiInit();
+}
+
+function debouncedReload(){
+  clearTimeout(debounceT);
+  debounceT = setTimeout(reloadList, 220);
+}
+
+function reloadList(){
+  setMsg('listMsg', 'Cargando…');
+  const q = document.getElementById('q').value.trim();
+  const group = document.getElementById('group').value;
+  const mode = document.getElementById('mode').value;
+
+  google.script.run
+    .withSuccessHandler(res => {
+      LIST = (res && res.rows) ? res.rows : [];
+      PENDING = Number((res && res.pending) || PENDING || 0);
+
+      renderList();
+      setMsg('listMsg', LIST.length ? `${LIST.length} contactos (pendientes: ${PENDING})` : 'Sin resultados');
+      if (!SEL && LIST.length) select(LIST[0].contactId, false);
+      if (SEL && LIST.length && !LIST.some(x => x.contactId === SEL)) select(LIST[0].contactId, false);
+    })
+    .withFailureHandler(e => setMsg('listMsg', (e && e.message) ? e.message : String(e)))
+    .apiList({ q, group, mode, limit: 1200 });
+}
+
+function renderList(){
+  const host = document.getElementById('list');
+  host.innerHTML = '';
+
+  const frag = document.createDocumentFragment();
+  LIST.forEach(r => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'item' + (SEL === r.contactId ? ' sel' : '');
+    btn.dataset.id = r.contactId;
+    btn.innerHTML = `
+      <div class="ico">${escapeHtml(r.icono || '')}</div>
+      <div class="nm">
+        <div class="name">${escapeHtml(r.nombre || '(sin nombre)')}</div>
+        <div class="sub">
+          <span class="status s-${escapeHtml(r.status || 'ok')}">${escapeHtml(stText(r.status || 'ok'))}</span>
+          <span>prox: ${escapeHtml(r.prox_contacto || '—')}</span>
+          <span>${escapeHtml(r.periodo || '')}</span>
+        </div>
+      </div>
+      <div class="tot">${formatTot(r.tot)}</div>
+    `;
+    frag.appendChild(btn);
+  });
+  host.appendChild(frag);
+}
+
+document.addEventListener('click', (ev) => {
+  const btn = ev.target.closest('button.item');
+  if (!btn) return;
+  select(btn.dataset.id, true);
+});
+
+function select(contactId){
+  SEL = contactId;
+  loadLite(contactId);
+}
+
+function loadLite(contactId){
+  setMsg('msg', 'Cargando…');
+  google.script.run
+    .withSuccessHandler(res => {
+      setMsg('msg', '');
+      BASELINE_UT = String(res.peopleUpdateTime || '').trim();
+      FETCHED_AT_MS = Date.now();
+      FETCHED_AT_MS = Date.now();
+      const roi = res.roi || {};
+      document.getElementById('title').textContent = roi.nombre || '(sin nombre)';
+      document.getElementById('icono').textContent = roi.icono || '—';
+      document.getElementById('tot').textContent = formatTot(roi.tot);
+      document.getElementById('perView').textContent = roi.periodo || '—';
+      document.getElementById('proxView').textContent = res.prox_contacto || '—';
+
+      document.getElementById('conf').value = (roi.conf ?? '');
+      document.getElementById('emo').value  = (roi.emo ?? '');
+      document.getElementById('ene').value  = (roi.ene ?? '');
+      document.getElementById('est').value  = (roi.est ?? '');
+      document.getElementById('rep').value  = (roi.rep ?? '');
+      document.getElementById('periodo').value = (roi.periodo ?? '');
+
+      document.getElementById('prox').value = res.prox_contacto || '';
+      document.getElementById('proxHint').textContent = res.proposed_prox
+        ? `Sugerencia (hoy+periodo): ${res.proposed_prox}` : '';
+
+      document.getElementById('groups').textContent = (res.groups && res.groups.length) ? res.groups.join(' · ') : '(sin grupos)';
+      BASELINE_FORM = snapshotForm();
+    })
+    .withFailureHandler(e => setMsg('msg', (e && e.message) ? e.message : String(e)))
+    .apiGetContactLite(contactId);
+}
+
+function snapshotForm(){
+  return {
+    conf: document.getElementById('conf').value,
+    emo: document.getElementById('emo').value,
+    ene: document.getElementById('ene').value,
+    est: document.getElementById('est').value,
+    rep: document.getElementById('rep').value,
+    periodo: document.getElementById('periodo').value,
+    prox_contacto: document.getElementById('prox').value
+  };
+}
+
+function isDirty(){
+  if (!BASELINE_FORM) return false;
+  const cur = snapshotForm();
+  for (const k in cur){
+    if (String(cur[k] ?? '') !== String(BASELINE_FORM[k] ?? '')) return true;
+  }
+  return false;
+}
+
+function collectPayload(){
+  const selected = LIST.find(x => x.contactId === SEL) || {};
+  return {
+    contactId: SEL,
+    peopleRN: (selected.peopleRN || '').trim(),
+    nombre: (document.getElementById('title').textContent || '').trim(),
+    conf: document.getElementById('conf').value,
+    emo: document.getElementById('emo').value,
+    ene: document.getElementById('ene').value,
+    est: document.getElementById('est').value,
+    rep: document.getElementById('rep').value,
+    periodo: document.getElementById('periodo').value,
+    prox_contacto: document.getElementById('prox').value,
+    baselineUpdateTime: BASELINE_UT,
+    _fetchedAtMs: FETCHED_AT_MS,
+    _clientDirty: isDirty()
+  };
+}
+
+function save(opts){
+  opts = opts || {};
+  if (!SEL) return;
+
+  if (!isDirty()) {
+    setMsg('msg', 'Nada que guardar.');
+    return;
+  }
+
+  if (FETCHED_AT_MS && (Date.now() - FETCHED_AT_MS > STALE_MS)) {
+    setMsg('msg', 'Edición caducada (>10 min). Pulsa Recargar y reintenta.');
+    return;
+  }
+
+  setMsg('msg', 'Guardando en Sheets…');
+  google.script.run
+    .withSuccessHandler(res => {
+      if (!res || !res.ok) return setMsg('msg', (res && res.error) || 'Error');
+      PENDING = Number((res && res.pending) || PENDING || 0);
+      setMsg('msg', `OK (pendientes: ${PENDING})`);
+      if (res.lite) loadLite(SEL);
+
+      if (opts.goNext) {
+        const idx = LIST.findIndex(x => x.contactId === SEL);
+        if (idx >= 0 && idx + 1 < LIST.length) select(LIST[idx + 1].contactId, true);
+      }
+    })
+    .withFailureHandler(e => setMsg('msg', (e && e.message) ? e.message : String(e)))
+    .apiSave(collectPayload());
+}
+
+function saveAndNext(){ save({ goNext: true }); }
+
+initUI();
+
+['conf','emo','ene','est','rep','periodo','prox'].forEach(id => {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener('change', setSaveEnabled);
+  el.addEventListener('input', setSaveEnabled);
+});
+</script>
